@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <style>
+            body { 
+            }
+            canvas {
+                width: 800;
+                height: 600;
+            }
+            #render-button {
+                width: 180px;
+                height: 50px;
+                font-size: 24pt;
+            }
+            #the-canvas { border: 1px solid darkblue; }
+            #user-matrix input { width: 64px; font-size: 24px; }
+        </style>
+    </head>
+
+    <body>
+        <canvas id = "the-canvas" width = "800" height = "600"></canvas>
+        <script src = "lib.js"></script>
+        <script src = "vector.js"></script>
+        <script src = "matrix.js"></script>
+        <script src = "mesh.js"></script>
+        <script src = "controls.js"></script>
+        <script src = "cam.js"></script>
+        <script src = "material.js"></script>
+        <script src = "node.js"></script>
+        <script src = "render_mesh.js"></script>
+        <script>
+            let cow_mesh;
+            let note_mesh;
+            let canvas = document.getElementById( 'the-canvas' );
+            /** @type {WebGLRenderingContext} */
+            let gl = canvas.getContext( 'webgl2' );
+            function generate_render_jobs(parent_matrix, node, jobs){ //generate render jobs from slides
+                let matrix = parent_matrix.mul(node.get_matrix());
+                if (node.data != null) { //slides have this as this.data
+                    jobs.push(new RenderMesh(matrix, node.data)); //slides have this as this.data
+                }
+                for(let child of node.children){
+                    generate_render_jobs(matrix, child, jobs);
+                }
+            }
+
+            const light_colors = [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0]
+            ];
+
+            let light1_index = 0;
+            let light2_index = 1;
+            let light3_index = 2;
+
+            let frame_counter = 0;
+            const frame_interval = 60;
+
+            function update_light_colors(shader_program){
+                frame_counter++;
+                if (frame_counter >= frame_interval){
+                    set_uniform_vec3(gl, shader_program, 'light1_color', ...light_colors[light1_index % light_colors.length]);
+                    set_uniform_vec3(gl, shader_program, 'light2_color', ...light_colors[light2_index % light_colors.length]);
+                    set_uniform_vec3(gl, shader_program, 'light3_color', ...light_colors[light3_index % light_colors.length]);
+                    light1_index += 1;
+                    light2_index += 1;
+                    light3_index += 1;
+                    frame_counter = 0;
+                }
+            }
+
+            let initial_time = performance.now();
+
+            function update_light_pos(shader_program){
+                const radius = 1.0;
+                const speed = 0.002;
+                const elapsed_time = (performance.now() - initial_time);
+                const angle1 = elapsed_time * speed;
+                const angle2 = elapsed_time * speed * 1.5;
+                const angle3 = elapsed_time * speed * 2.0;
+
+                const x1 = radius * Math.cos(angle1);
+                const z1 = radius * Math.sin(angle2);
+
+                const x2 = radius * Math.cos(angle2);
+                const z2 = radius * Math.sin(angle2);
+
+                const x3 = radius * Math.cos(angle3);
+                const z3 = radius * Math.cos(angle3);
+
+                set_uniform_vec3(gl, shader_program, 'light1', x1, 1.0, z1);
+                set_uniform_vec3(gl, shader_program, 'light2', x2, 1.0, z2);
+                set_uniform_vec3(gl, shader_program, 'light3', x3, 1.0, z3);
+            }
+
+            let vertex_source = 
+            `   #version 300 es
+                precision mediump float;
+
+                uniform mat4 modelview;
+                uniform mat4 model;
+                uniform mat4 view;
+
+                in vec3 coordinates;
+                in vec4 color;
+                in vec2 uv;
+                in vec3 normal;
+
+                out vec4 v_color;
+                out vec2 v_uv;
+
+                uniform float mat_ambient;
+                uniform float mat_diffuse;
+                uniform float mat_specular;
+                uniform float mat_shininess;
+
+                uniform vec3 light1; //direction TO the sun
+                uniform vec3 light1_color;
+                uniform vec3 light2;
+                uniform vec3 light2_color;
+                uniform vec3 light3;
+                uniform vec3 light3_color;
+                uniform vec3 camera_pos;
+
+                vec3 diff_color(
+                        vec3 normal,
+                        vec3 light_dir,
+                        vec3 light_color,
+                        float mat_diffuse
+                ){
+                    return mat_diffuse * light_color * max(dot(normal, light_dir), 0.0);
+                }
+                
+                void main( void ) {
+                    gl_Position = modelview * vec4( coordinates, 1.0 );
+                    v_color = color;
+                    v_uv = uv;
+
+                    //transform normal
+                    vec3 normal_tx = normalize(mat3(model) * normal);
+
+                    //transform coordinates
+                    vec3 coords_tx = (model * vec4(coordinates, 1.0)).xyz;
+
+                    //normalized sun_dir
+                    vec3 norm_light1 = normalize(light1);
+                    vec3 norm_light2 = normalize(light2);
+                    vec3 norm_light3 = normalize(light3);
+                    
+                    //direction to point light
+                    // vec3 to_pt_light = normalize(red_pos - coords_tx);
+                    // float distance = length(to_pt_light);
+
+                    //attenuation of point light
+                    // float attenuation = 1.0 / (distance * distance);
+
+                    //set ambient color
+                    vec4 ambient_color = vec4(mat_ambient, mat_ambient, mat_ambient, 1.0);
+
+                    //diffuse (light1)
+                    vec3 diffuse1 = diff_color(normal_tx, norm_light1, light1_color, mat_diffuse);
+                    //diffuse (light2)
+                    vec3 diffuse2 = diff_color(normal_tx, norm_light2, light2_color, mat_diffuse);
+                    //diffuse (light3)
+                    vec3 diffuse3 = diff_color(normal_tx, norm_light3, light3_color, mat_diffuse);
+                    
+                    //specular1
+                    vec3 specular1 = vec3(0.0);
+                    float cos_light_surf_normal1 = dot(normal_tx, norm_light1);
+                    if (cos_light_surf_normal1 >= 0.0){
+                        vec3 R = 2.0 * dot(normal_tx, norm_light1) * normal_tx - norm_light1;
+                        vec3 V = normalize(camera_pos - coords_tx);
+                        specular1 = mat_specular * pow(max(dot(R, V), 0.0), mat_shininess) * light1_color;
+                    }
+                    //specular2
+                    vec3 specular2 = vec3(0.0);
+                    float cos_surf_normal2 = dot(normal_tx, norm_light2);
+                    if (cos_surf_normal2 >= 0.0){
+                        vec3 R = 2.0 * dot(normal_tx, norm_light2) * normal_tx - norm_light2;
+                        vec3 V = normalize(camera_pos - coords_tx);
+                        specular2 = mat_specular * pow(max(dot(R, V), 0.0), mat_shininess) * light2_color;
+                    }
+                    //specular3
+                    vec3 specular3 = vec3(0.0);
+                    float cos_light_surf_normal3 = dot(normal_tx, norm_light3);
+                    if (cos_light_surf_normal3 >= 0.0){
+                        vec3 R = 2.0 * dot(normal_tx, norm_light3) * normal_tx - norm_light3;
+                        vec3 V = normalize(camera_pos - coords_tx);
+                        specular3 = mat_specular * pow(max(dot(R, V), 0.0), mat_shininess) * light3_color;
+                    }
+                    
+                    //combine lighting components to get final ambient color
+                    v_color = ambient_color + vec4(diffuse1, 1.0) +  vec4(specular1, 1.0) + vec4(diffuse2, 1.0) + vec4(specular2, 1.0) + vec4(diffuse3, 1.0) + vec4(specular3, 1.0);
+                }
+            `;
+            
+            let fragment_source = 
+            `   #version 300 es
+                precision mediump float;
+
+                in vec4 v_color;
+                in vec2 v_uv;
+
+                uniform sampler2D tex_0;
+
+                out vec4 f_color;
+
+                void main( void ) {
+                    // f_color = v_color;
+                    f_color = v_color * texture (tex_0, v_uv);
+                }
+            `;
+
+            let heights = [
+                [.5,.5,.2,.2,.2,.1,.1,.1,.1,.1],
+                [.5,.5,.2,.1,0.1,0,0,0,0,0],
+                [.2,.2,.1,0,0,0,0,0,0,.1],
+                [.2,.1,0,0,0,0,0,0,.1,.2],
+                [.1,0,0,0,0,0,0,0,.1,.2],
+                [0,0,0,0,0.7,0,0,0.5,.1,.2],
+                [0,0,0.5,0.9,0.8,0.5,0,.1,.2,.2],
+            ];
+
+            let shader_program = 
+                create_compile_and_link_program( gl, vertex_source, fragment_source );
+            gl.useProgram( shader_program );
+
+            let metal_texture = gl.createTexture();
+            let metal_image = new Image();
+            metal_image.src = 'metal_scale.png';
+            metal_image.onload = on_load_metal;
+            function on_load_metal(){
+                gl.bindTexture(gl.TEXTURE_2D, metal_texture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, metal_image);
+                gl.generateMipmap(gl.TEXTURE_2D);
+            };
+
+            let disco_tex = gl.createTexture();
+            let disco_image = new Image();
+            disco_image.src = 'disco.jpg';
+            disco_image.onload = on_load_disco;
+            function on_load_disco(){
+                gl.bindTexture(gl.TEXTURE_2D, disco_tex);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, disco_image);
+                gl.generateMipmap(gl.TEXTURE_2D);
+            };
+
+            let dirt_texture = gl.createTexture();
+            let dirt_image = new Image();
+            dirt_image.src = 'dirt.jpg';
+            dirt_image.onload = on_load_dirt;
+            function on_load_dirt(){
+                gl.bindTexture(gl.TEXTURE_2D, dirt_texture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, dirt_image);
+                gl.generateMipmap(gl.TEXTURE_2D);
+            };
+
+            let sky_texture = gl.createTexture();
+            let sky_image = new Image();
+            sky_image.src = 'sky.png';
+            sky_image.onload = on_load_sky;
+            function on_load_sky(){
+                gl.bindTexture(gl.TEXTURE_2D, sky_texture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sky_image);
+                gl.generateMipmap(gl.TEXTURE_2D);
+            };
+
+            set_render_params( gl );
+            set_render_params( gl );
+            Mesh.from_obj_file(gl, "cow.obj", shader_program, "CowImage.png", function (loaded_mesh){
+                cow_mesh = loaded_mesh;
+                build_and_run_scene();
+            });
+
+            function build_and_run_scene() {
+
+                console.log(cow_mesh);
+                let last_update = performance.now();
+                const DESIRED_TICK_RATE = 60;
+                const DESIRED_MSPT = 1000.0 / DESIRED_TICK_RATE;
+
+                const ROTATION_SPEED = 0.125; // eighth turn per second
+                const ROTATION_SPEED_PER_FRAME = ROTATION_SPEED / DESIRED_TICK_RATE;
+
+                const FLY_SPEED = 1;    // units per second
+                const FLY_SPEED_PER_FRAME = FLY_SPEED / DESIRED_TICK_RATE;
+
+                let keys = Keys.start_listening();
+                let cam = new Camera();
+                cam.translate( 0, 1, -4.5);
+                const camera_pos = {x: cam.x, y:cam.y, z: cam.z};
+
+                set_uniform_vec3(gl, shader_program, 'light1', 0.0, 1.0, 1.0);
+                set_uniform_vec3(gl, shader_program, 'light1_color', 0.0, 1.0, 0.0);
+                set_uniform_vec3(gl, shader_program, 'light2', -1.0, 1.0, -1.0);
+                set_uniform_vec3(gl, shader_program, 'light2_color', 1.0, 0.0, 0.0);
+                set_uniform_vec3(gl, shader_program, 'light3', 1.0, 1.0, -1.0);
+                set_uniform_vec3(gl, shader_program, 'light3_color', 0.0, 0.0, 1.0);
+
+
+                //trying to create a second sphere that is the child of the first sphere here
+                const metal_material = new Material(0.25, 1.0, 2.0, 4, metal_texture);
+                const dirt_material = new Material(0.25, 1.0, 1.0, 1, dirt_texture);
+                const disco_material = new Material(0.25, 1.0, 2.0, 4, disco_tex);
+                const sky_material = new Material(1.5, 0.0, 0.0, 1, sky_texture);
+
+                let discoball = Mesh.make_uv_sphere( gl, shader_program, 20, disco_material, false);
+                let stage = Mesh.box(gl, shader_program, 4, 0.5, 1, metal_material);
+                let projection = Mat4.perspective_fovx( 0.25, 4 / 3, 0.25, 64 );
+                let sky = Mesh.make_uv_sphere(gl, shader_program, 20, sky_material, true);
+                let ground = Mesh.from_heightmap(gl, shader_program, heights, 0, 0, dirt_material);
+
+                let rootNode = new Node();
+                let skyNode = rootNode.add_child();
+                let groundNode = rootNode.add_child();
+                groundNode.data = ground;
+                groundNode.scale = new Vec4(10,10,10,1);
+                groundNode.position = new Vec4(0,-0.3,0,1);
+                skyNode.data = sky;
+                skyNode.scale = new Vec4(100, 100, 100, 1);
+                let stageNode = rootNode.add_child();
+                stageNode.data = stage;
+                let ballone = stageNode.add_child();
+                ballone.data = discoball;
+                ballone.scale = new Vec4(0.5, 0.5, 0.5, 1);
+                ballone.position = new Vec4(-2,2,0,1);
+                let balltwo = stageNode.add_child();
+                balltwo.scale = new Vec4(0.5, 0.5, 0.5, 1);
+                balltwo.position = new Vec4(2,2,0,1);
+                balltwo.data = discoball;
+                let cowNode = rootNode.add_child();
+                cowNode.data = cow_mesh;
+                cowNode.position = new Vec4(0,0.70,-0.5,1);
+                cowNode.scale = new Vec4(0.1,0.1,0.1,1);
+                cowNode.yaw = 0.25;
+                cowNode.roll = -0.1;
+
+                const jump_amplitude = 0.3; // Adjust the amplitude of the jump
+                const jump_frequency = 1.0; // Adjust the frequency of the jump
+                let jump_time = 0;
+
+                const crowd_jump_amplitude = 0.1; // Adjust the amplitude of the jump
+                const crowd_jump_frequency = 0.5; // Adjust the frequency of the jump
+                let crowd_jump_time = 0;
+
+                const pitch_amplitude = 0.1; // Adjust the amplitude of the pitch
+                const pitch_frequency = 1.0; // Adjust the frequency of the pitch
+                let pitch_time = 0;
+
+                is_jumping = true;
+
+                let light_anchor_node = rootNode.add_child();
+                light_anchor_node.position = new Vec4(0,1,0,1);
+
+                let crowdNode = rootNode.add_child();
+                crowdNode.position = new Vec4(-3,0,-3);
+                for(let i = 0; i < 10; i++){
+                    let p = crowdNode.add_child();
+                    p.position = new Vec4(i/2,0,0,1);
+                    p.data = cow_mesh;
+                    p.scale = new Vec4(0.1,0.1,0.1,1);
+                    p.yaw = -0.25;
+                }
+
+                function getRandomCow(crowdNode){
+                    min = 0;
+                    max = crowdNode.children.length -1;
+                    return crowdNode.children[Math.floor(Math.random() * (max - min +1)) + min];
+                }
+
+                
+
+                function render( now ) {
+                    let dt = (now - last_update) / 1000;
+                    gl.clear( gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT );
+                    let jobs = []; //render jobs
+                    set_uniform_vec3(gl, shader_program, 'camera_pos', cam.x, cam.y, cam.z); //update camera pos every render
+                    set_uniform_matrix4(gl, shader_program, 'view', projection.data); //view matrix
+                    // update_light_colors(shader_program);
+                    update_light_pos(shader_program);                    
+                    generate_render_jobs(new Mat4(), rootNode, jobs);
+                    for (let job of jobs){
+                        let model = job.matrix;
+                        set_uniform_matrix4(gl, shader_program, 'model', model.data); //model in this case is just the identity matrix
+                        model = cam.get_view_matrix().mul(model);
+                        model = projection.mul(model);
+                        set_uniform_matrix4(gl, shader_program, "modelview", model.data ); //modelview is view (projection) multiplied with the model
+                        job.mesh.render(gl); //custom render function in mesh.js
+                    }
+
+                    requestAnimationFrame( render );
+                }
+
+                const KEYMAP = {
+                    'KeyW': function() { cam.move_in_direction( 0, 0, FLY_SPEED_PER_FRAME ); },
+                    'KeyS': function() { cam.move_in_direction( 0, 0, -FLY_SPEED_PER_FRAME ); },
+                    'KeyA': function() { cam.move_in_direction( -FLY_SPEED_PER_FRAME, 0, 0 ); },
+                    'KeyD': function() { cam.move_in_direction( FLY_SPEED_PER_FRAME, 0, 0 ); },
+                    'Space': function() { cam.translate( 0, FLY_SPEED_PER_FRAME, 0 ); },
+                    'KeyC': function() { cam.translate( 0, -FLY_SPEED_PER_FRAME, 0 ); },
+                    'KeyQ': function() { cam.add_roll( -ROTATION_SPEED_PER_FRAME ); },
+                    'KeyE': function() { cam.add_roll( ROTATION_SPEED_PER_FRAME ); },
+                    'ArrowLeft': function() { cam.add_yaw( -ROTATION_SPEED_PER_FRAME ); },
+                    'ArrowRight': function() { cam.add_yaw( ROTATION_SPEED_PER_FRAME ); },
+                    'ArrowUp': function() { cam.add_pitch( -ROTATION_SPEED_PER_FRAME ); },
+                    'ArrowDown': function() { cam.add_pitch( ROTATION_SPEED_PER_FRAME ); },
+                };
+
+                function update() {
+                    let keys_down = keys.keys_down_list();
+                    const camera_pos = {x: cam.x, y:cam.y, z:cam.z}; //update camera_pos
+
+                    if (is_jumping){
+                        //cow jumping animation
+                        const jump_speed = 0.25;
+                        jump_time += jump_speed;
+                        const jump_offset = jump_amplitude * Math.sin(jump_frequency * jump_time);
+                        cowNode.position.y = Math.max(0.70, 0.70 + jump_offset);
+
+                        if (jump_time >= 2 * Math.PI / jump_frequency){
+                            is_jumping = false;
+                            jump_time = 0;
+                        }
+                    }else{
+                        const pitch_speed = 0.1; // Adjust the speed of the pitch
+                        pitch_time += pitch_speed;
+                        const pitch_offset = pitch_amplitude * Math.sin(pitch_frequency * pitch_time);
+
+                        // Update the pitch angle of cowNode
+                        cowNode.pitch = pitch_offset;
+                        if (pitch_time >= 2 * Math.PI / pitch_frequency){
+                            is_jumping = true;
+                            pitch_time = 0;
+                        }
+                    }
+
+                    let child = getRandomCow(crowdNode);
+                    const crowd_jump_speed = 0.5;
+                    crowd_jump_time += crowd_jump_speed;
+                    const crowd_jump_offset = crowd_jump_amplitude * Math.sin(crowd_jump_frequency * crowd_jump_time);
+                    child.position.y = Math.max(0.0, 0.0+crowd_jump_offset);
+
+
+                    for( const key of keys_down ) {
+                    let bound_function = KEYMAP[ key ];
+
+                    if( bound_function ) {
+                        bound_function();
+                    }
+                    }
+
+                    return;
+                }
+                
+                requestAnimationFrame( render );
+                setInterval( update, DESIRED_MSPT );
+            }
+        </script>
+    </body>
+</html>
